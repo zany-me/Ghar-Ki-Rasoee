@@ -1,0 +1,1319 @@
+import React, { useState, useEffect } from 'react';
+import { useLocation, useNavigate, Link } from 'react-router-dom';
+import PageContainer from '../../../components/layout/PageContainer';
+import { Check, ShieldCheck, MapPin, AlertCircle, CreditCard, DollarSign, AlertTriangle, X, Calendar, Phone, MessageSquare, Clock, Truck, Info } from 'lucide-react';
+import { useAuth } from '../../../context/AuthContext';
+import axios from 'axios';
+import { ENV } from '../../../config/env.config';
+import LocationPicker, { SelectedLocationData } from '../../../components/common/LocationPicker';
+import { useCity } from '../../../context/CityContext';
+import { matchAddressToAdminCities } from '../../../utils/cityMatcher';
+import { useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+import { getNextDeliverySchedule } from '../../../utils/deliverySchedule';
+
+const SubscriptionCheckout: React.FC = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const { plan, address: prefilledAddress } = location.state || {};
+  const { selectedCity, selectedCategory, selectCity, cityCategories } = useCity();
+
+  const [currentPlan, setCurrentPlan] = useState(plan);
+  const [loading, setLoading] = useState(false);
+  const [customQuoteLoading, setCustomQuoteLoading] = useState(false);
+  const [customQuoteError, setCustomQuoteError] = useState('');
+  const [pricingRefreshTick, setPricingRefreshTick] = useState(0);
+  const [error, setError] = useState('');
+  const [isLocationPickerOpen, setIsLocationPickerOpen] = useState(false);
+  const [address, setAddress] = useState(prefilledAddress || '');
+  const [paymentMethod, setPaymentMethod] = useState<'Stripe' | 'COD'>('Stripe');
+
+  // Recurring subscription states (only for subscription type plans)
+  const [isRecurring, setIsRecurring] = useState(true);
+  const [legalConsent, setLegalConsent] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+
+  // Active subscription checking states
+  const [hasActiveSub, setHasActiveSub] = useState(false);
+  const [showWarningModal, setShowWarningModal] = useState(false);
+  const [bypassWarning, setBypassWarning] = useState(false);
+  const [replacePlan, setReplacePlan] = useState(true);
+
+  // Coupon states
+  const [couponInput, setCouponInput] = useState('');
+  const [validatingCoupon, setValidatingCoupon] = useState(false);
+  const [couponError, setCouponError] = useState('');
+  const [couponSuccess, setCouponSuccess] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [notes, setNotes] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<{
+    code: string;
+    discountType: 'percentage' | 'fixed';
+    discountValue: number;
+    discountAmount: number;
+    finalAmount: number;
+    duration?: 'once' | 'repeating' | 'forever';
+    durationInMonths?: number | null;
+  } | null>(null);
+
+  const isOneTime = plan?.type === 'one-time';
+
+  const [selectedDays, setSelectedDays] = useState<string[]>(
+    plan?.customDetails?.deliveryDays || [
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday'
+    ]
+  );
+
+  const [deliverySettings, setDeliverySettings] = useState<{ minAmountForFreeDelivery: number; deliveryFee: number; deliveryFeePerSelectedDay?: number }>({
+    minAmountForFreeDelivery: 150,
+    deliveryFee: 15
+  });
+
+  useEffect(() => {
+    const fetchUserProfile = async () => {
+      if (user) {
+        try {
+          const token = await user.getIdToken();
+          const res = await axios.get(`${ENV.API_URL}/auth/profile`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.data?.data) {
+            const profileData = res.data.data;
+            if (profileData.phone && profileData.phone !== 'N/A') {
+              setCustomerPhone((prev) => prev || profileData.phone);
+            } else if (user.phoneNumber) {
+              setCustomerPhone((prev) => prev || user.phoneNumber || '');
+            }
+            if (!address && profileData.address && profileData.address !== 'No address provided') {
+              setAddress(profileData.address);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to fetch user profile in checkout:", err);
+        }
+      }
+    };
+    fetchUserProfile();
+  }, [user]);
+
+  useEffect(() => {
+    setCurrentPlan(plan);
+  }, [plan]);
+
+  // Synchronize plan prices and delivery fee settings whenever selectedCity changes
+  useEffect(() => {
+    const fetchPlanAndDeliverySettings = async () => {
+      try {
+        const res = await axios.get(`${ENV.API_URL}/menu/plans`, {
+          params: { city: selectedCity }
+        });
+        if (res.data.success) {
+          if (res.data.data.deliveryFeeSettings) {
+            setDeliverySettings(res.data.data.deliveryFeeSettings);
+          }
+          if (res.data.data.plans && currentPlan) {
+            const planKey = (currentPlan.key || currentPlan.name?.toLowerCase() || '').trim();
+            const updatedTierPlan = res.data.data.plans[planKey];
+            if (updatedTierPlan && !currentPlan.customDetails?.isCustomPlan) {
+              setCurrentPlan((prev: typeof plan) => ({
+                ...prev,
+                price: updatedTierPlan.price
+              }));
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch delivery settings:", err);
+      }
+    };
+    fetchPlanAndDeliverySettings();
+  }, [selectedCity]);
+
+  useEffect(() => {
+    if (!plan?.customDetails?.isCustomPlan) return;
+    const timer = window.setInterval(() => setPricingRefreshTick((tick) => tick + 1), 30000);
+    return () => window.clearInterval(timer);
+  }, [plan]);
+
+  // Custom plans are always re-quoted by the server. This keeps admin pricing,
+  // city changes, and delivery-day changes synchronized with checkout.
+  useEffect(() => {
+    if (!plan?.customDetails?.isCustomPlan || isOneTime || selectedDays.length === 0) {
+      setCustomQuoteError('');
+      return;
+    }
+    const controller = new AbortController();
+    const selections = plan.customDetails.selections || {
+      roti: plan.customDetails.roti,
+      sabji: plan.customDetails.sabji ?? plan.customDetails.sabziChoices,
+      dal: plan.customDetails.dal ?? 0,
+      rice: plan.customDetails.rice ?? 0,
+      raitaFrequency: plan.customDetails.raitaFrequency ?? plan.customDetails.raitaOption,
+      saladFrequency: plan.customDetails.saladFrequency ?? 'none',
+      sweetDishFrequency: plan.customDetails.sweetDishFrequency ?? plan.customDetails.dessertOption,
+      saturdaySpecial: Boolean(plan.customDetails.saturdaySpecial)
+    };
+    setCustomQuoteLoading(true);
+    setCustomQuoteError('');
+    axios.post(`${ENV.API_URL}/menu/custom-plan/quote`, {
+      basePlan: plan.customDetails.basePlan,
+      selections,
+      deliveryDays: selectedDays,
+      city: selectedCity
+    }, { signal: controller.signal }).then((res) => {
+      const quote = res.data?.data?.quote || res.data?.data;
+      if (!quote || !Number.isFinite(Number(quote.customizedSubtotal))) throw new Error('Invalid quote response');
+      setCurrentPlan((prev: typeof plan) => ({
+        ...prev,
+        price: Number(quote.customizedSubtotal),
+        customDetails: { ...prev.customDetails, selections: quote.selectedComponents || selections, pricingVersion: quote.pricingVersion, quote }
+      }));
+      setAppliedCoupon(null);
+    }).catch((err) => {
+      if (!axios.isCancel(err)) setCustomQuoteError(axios.isAxiosError(err) ? err.response?.data?.message || 'Unable to update custom plan pricing.' : 'Unable to update custom plan pricing.');
+    }).finally(() => { if (!controller.signal.aborted) setCustomQuoteLoading(false); });
+    return () => controller.abort();
+  }, [plan, selectedCity, selectedDays, isOneTime, pricingRefreshTick]);
+
+  // Address validation against dynamic admin city categories
+  const addressMatch = address ? matchAddressToAdminCities(address, cityCategories) : null;
+  const isAddressMismatch = Boolean(
+    address && addressMatch?.eligible && addressMatch?.categoryKey && selectedCategory && addressMatch.categoryKey !== selectedCategory
+  );
+  const isAddressUnsupported = Boolean(address && address.trim().length > 5 && !addressMatch?.eligible);
+
+  const handleSyncCityAndPrice = () => {
+    if (!addressMatch?.city) return;
+    selectCity(addressMatch.city);
+    toast.success(`Switched delivery city to ${addressMatch.city}. Pricing updated.`);
+  };
+
+  const getAdjustedPrice = () => {
+    const basePrice = currentPlan?.price || 0;
+    if (isOneTime) return basePrice;
+    if (currentPlan?.customDetails?.isCustomPlan) return basePrice;
+    const adjusted = (basePrice * selectedDays.length) / 6;
+    return Math.round(adjusted * 100) / 100;
+  };
+
+  const getCouponAmounts = () => {
+    const baseAmount = getAdjustedPrice();
+    if (!appliedCoupon) return { discountAmount: 0, finalAmount: baseAmount };
+    return {
+      discountAmount: appliedCoupon.discountAmount,
+      finalAmount: paymentMethod === 'Stripe'
+        ? Math.max(0.50, appliedCoupon.finalAmount)
+        : appliedCoupon.finalAmount,
+    };
+  };
+
+  const { discountAmount, finalAmount } = getCouponAmounts();
+  const basePriceForDelivery = getAdjustedPrice();
+  const isFreeDelivery = isOneTime
+    || basePriceForDelivery >= deliverySettings.minAmountForFreeDelivery;
+  // The admin-configured delivery fee is the rate for one selected weekday.
+  // One-time meals keep their existing free-delivery policy.
+  const selectedDeliveryDayCount = new Set(
+    selectedDays.map((day) => day.toLowerCase())
+  ).size;
+  const hasExplicitOneDayRate = Number.isFinite(deliverySettings.deliveryFeePerSelectedDay);
+  const oneDayDeliveryRate = hasExplicitOneDayRate
+    ? Number(deliverySettings.deliveryFeePerSelectedDay)
+    : deliverySettings.deliveryFee / 6;
+  const deliveryFee = isFreeDelivery
+    ? 0
+    : Math.round(
+        (hasExplicitOneDayRate
+          ? oneDayDeliveryRate * selectedDeliveryDayCount
+          : deliverySettings.deliveryFee * selectedDeliveryDayCount / 6) * 100
+      ) / 100;
+  const serviceFee = Math.round((finalAmount * 0.025 + 0.30) * 100) / 100;
+  const totalAmount = Math.round((finalAmount + deliveryFee + serviceFee) * 100) / 100;
+
+  useEffect(() => {
+    const checkActiveSubscription = async () => {
+      if (!user || isOneTime) return;
+      try {
+        const token = await user.getIdToken();
+        const res = await axios.get(`${ENV.API_URL}/subscriptions`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const subs = res.data.data;
+        if (Array.isArray(subs)) {
+          const active = subs.some((s: { status?: string }) => s.status === 'Active');
+          if (active) setHasActiveSub(true);
+        } else if (subs && (subs as { status?: string }).status === 'Active') {
+          setHasActiveSub(true);
+        }
+      } catch (err) {
+        console.error("Error checking active subscription:", err);
+      }
+    };
+    checkActiveSubscription();
+  }, [user, isOneTime]);
+
+  useEffect(() => {
+    if (paymentMethod === 'COD' && appliedCoupon?.duration === 'repeating') {
+      setAppliedCoupon(null);
+      setCouponInput('');
+      setCouponSuccess('');
+      setCouponError('Multi-month discount coupons are only valid for Stripe payments.');
+    }
+  }, [paymentMethod, appliedCoupon]);
+
+  const handleApplyCoupon = async () => {
+    if (!couponInput.trim()) return;
+    setValidatingCoupon(true);
+    setError('');
+    setCouponError('');
+    setCouponSuccess('');
+    try {
+      const token = await user?.getIdToken();
+      const response = await axios.post(
+        `${ENV.API_URL}/payments/validate-coupon`,
+        {
+          code: couponInput.trim(),
+          amount: getAdjustedPrice(),
+          type: isOneTime ? 'one-time' : 'subscription'
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+      if (response.data.success) {
+        const couponData = response.data.data;
+        if (isOneTime && couponData.duration === 'repeating') {
+          setCouponError('Recurring subscription coupons cannot be applied to one-time meal orders.');
+          setAppliedCoupon(null);
+          return;
+        }
+        setAppliedCoupon(couponData);
+        setCouponSuccess('Coupon discount applied successfully!');
+        if (couponData.duration === 'repeating') {
+          setIsRecurring(true);
+          setLegalConsent(true);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      setCouponError(axios.isAxiosError(err) ? err.response?.data?.message || 'Invalid or expired coupon code' : 'Invalid or expired coupon code');
+      setAppliedCoupon(null);
+    } finally {
+      setValidatingCoupon(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponInput('');
+    setCouponSuccess('');
+    setCouponError('');
+  };
+
+  if (!plan) {
+    return (
+      <PageContainer className="py-20 text-center">
+        <h2 className="text-2xl font-bold mb-4 text-gray-800">No plan selected</h2>
+        <button 
+          onClick={() => navigate('/pricing')} 
+          className="bg-primary text-white px-6 py-2.5 rounded-xl font-semibold hover:bg-primary-hover transition"
+        >
+          View Plans
+        </button>
+      </PageContainer>
+    );
+  }
+
+  const executeCheckout = async (bypass = false, chosenReplacePlan = true) => {
+    setError('');
+
+    if (!isOneTime && paymentMethod === 'Stripe' && isRecurring && !legalConsent) {
+      setError("You must authorize recurring billing by checking the confirmation box to proceed.");
+      return;
+    }
+
+    if (!termsAccepted) {
+      setError("Please agree to the Terms of Service & Cancellation Policy to proceed.");
+      return;
+    }
+
+    if (!customerPhone || customerPhone.trim().length < 7) {
+      setError("Please enter a valid contact phone number so our delivery driver can reach you.");
+      return;
+    }
+
+    if (hasActiveSub && !bypass) {
+      setShowWarningModal(true);
+      return;
+    }
+
+    if (!isOneTime && selectedDays.length === 0) {
+      setError("Please select at least one delivery day.");
+      return;
+    }
+
+    if (currentPlan?.customDetails?.isCustomPlan && (customQuoteLoading || customQuoteError)) {
+      setError(customQuoteError || 'Please wait while your custom plan price is updated.');
+      return;
+    }
+
+    if (isAddressUnsupported) {
+      setError("Delivery is not available to this address. Please choose an address within our supported cities.");
+      return;
+    }
+
+    if (isAddressMismatch) {
+      setError(`Your delivery address is in ${addressMatch?.city} (${addressMatch?.categoryName}). Please click 'Switch to ${addressMatch?.city} & Update Pricing' to continue.`);
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      if (!user) throw new Error("Please log in to continue");
+      if (!address) throw new Error("Please select a delivery address");
+
+      const token = await user.getIdToken();
+
+      const customDetailsPayload = isOneTime 
+        ? (currentPlan.customDetails || undefined)
+        : {
+            ...(currentPlan.customDetails || {}),
+            deliveryDays: selectedDays,
+            basePlan: currentPlan.customDetails?.basePlan || currentPlan.name
+          };
+
+      if (!isOneTime && currentPlan.customDetails?.isCustomPlan) {
+        const liveQuoteResponse = await axios.post(`${ENV.API_URL}/menu/custom-plan/quote`, {
+          basePlan: customDetailsPayload.basePlan,
+          selections: customDetailsPayload.selections || customDetailsPayload,
+          deliveryDays: selectedDays,
+          city: selectedCity,
+        });
+        const liveQuote = liveQuoteResponse.data?.data?.quote || liveQuoteResponse.data?.data;
+        const liveSubtotal = Number(liveQuote?.customizedSubtotal);
+        if (!Number.isFinite(liveSubtotal)) throw new Error('Unable to verify the latest custom plan price.');
+        if (Math.abs(liveSubtotal - getAdjustedPrice()) >= 0.01) {
+          setCurrentPlan((prev: typeof plan) => ({
+            ...prev,
+            price: liveSubtotal,
+            customDetails: {
+              ...prev.customDetails,
+              selections: liveQuote.selectedComponents || customDetailsPayload.selections,
+              pricingVersion: liveQuote.pricingVersion,
+              quote: liveQuote,
+            },
+          }));
+          setAppliedCoupon(null);
+          setError('Pricing was updated by our team. Please review the new total and submit again.');
+          setLoading(false);
+          return;
+        }
+      }
+
+      // Auto-sync phone number to user profile
+      await axios.put(
+        `${ENV.API_URL}/auth/update-profile`,
+        { phone: customerPhone.trim(), address },
+        { headers: { Authorization: `Bearer ${token}` } }
+      ).catch(() => {});
+
+      if (paymentMethod === 'Stripe') {
+        const response = await axios.post(
+          `${ENV.API_URL}/payments/create-checkout-session`,
+          {
+            type: isOneTime ? 'one-time' : 'subscription',
+            planName: currentPlan.name,
+            amount: getAdjustedPrice(),
+            deliveryAddress: address,
+            city: selectedCity,
+            couponCode: appliedCoupon ? appliedCoupon.code : undefined,
+            isRecurring: isOneTime ? false : isRecurring,
+            customDetails: customDetailsPayload,
+            items: [{ name: currentPlan.name, quantity: 1, price: getAdjustedPrice() }],
+            replacePlan: chosenReplacePlan,
+            deliveryFee,
+            customerPhone: customerPhone.trim(),
+            notes: notes ? notes.trim() : undefined,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (response.data.success && response.data.data.url) {
+          window.location.href = response.data.data.url;
+        } else {
+          throw new Error("Failed to initialize checkout session");
+        }
+      } else {
+        if (isOneTime) {
+          // One-time meal with COD
+          const response = await axios.post(
+            `${ENV.API_URL}/orders`,
+            {
+              orderType: 'one-time',
+              items: [{ name: currentPlan.name, quantity: 1, price: currentPlan.price }],
+              price: currentPlan.price,
+              deliveryAddress: address,
+              city: selectedCity,
+              paymentMethod: 'Cash on Delivery',
+              paymentStatus: 'Pending',
+              couponCode: appliedCoupon ? appliedCoupon.code : undefined,
+              deliveryFee,
+              customDetails: customDetailsPayload,
+              customerPhone: customerPhone.trim(),
+              notes: notes ? notes.trim() : undefined,
+            },
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
+
+          if (response.data.success) {
+            navigate('/order-success');
+          } else {
+            throw new Error(response.data.message || "Failed to create order");
+          }
+        } else {
+          // Subscription with COD
+          const response = await axios.post(
+            `${ENV.API_URL}/subscriptions`,
+            {
+              plan: currentPlan.name,
+              planDetails: {
+                ...currentPlan,
+                price: getAdjustedPrice()
+              },
+              durationMonths: 1,
+              deliveryAddress: address,
+              city: selectedCity,
+              paymentMethod: 'Cash on Delivery',
+              paymentStatus: 'Pending',
+              couponCode: appliedCoupon ? appliedCoupon.code : undefined,
+              customDetails: customDetailsPayload,
+              replacePlan: chosenReplacePlan,
+              deliveryFee,
+              customerPhone: customerPhone.trim(),
+              notes: notes ? notes.trim() : undefined,
+            },
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
+
+          if (response.data.success) {
+            await queryClient.invalidateQueries({ queryKey: ['mySubscriptions'] });
+            toast.success('Pending for admin verification. Your invoice will be emailed after COD payment is confirmed.');
+            navigate('/my-subscription');
+          } else {
+            throw new Error(response.data.message || "Failed to create subscription");
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Checkout error:", err);
+      const msg = axios.isAxiosError(err)
+        ? err.response?.data?.message || err.message
+        : err instanceof Error
+        ? err.message
+        : "Failed to process request";
+      setError(msg);
+      setLoading(false);
+    }
+  };
+
+  const handleCheckout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeCheckout(bypassWarning, replacePlan);
+  };
+
+  const handleProceedReplace = async () => {
+    setReplacePlan(true);
+    setShowWarningModal(false);
+    setBypassWarning(true);
+    await executeCheckout(true, true);
+  };
+
+  const handleProceedAdd = async () => {
+    setReplacePlan(false);
+    setShowWarningModal(false);
+    setBypassWarning(true);
+    await executeCheckout(true, false);
+  };
+
+  const estimatedSchedule = getNextDeliverySchedule(
+    new Date(),
+    isOneTime ? undefined : (selectedDays.length > 0 ? selectedDays : undefined)
+  );
+
+  return (
+    <PageContainer className="py-6 sm:py-10 md:py-12 px-3 sm:px-6">
+      <div className="max-w-7xl mx-auto px-2 sm:px-4">
+        <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-gray-900 mb-6 sm:mb-8 text-center tracking-tight px-2">
+          {isOneTime ? 'Ready for a One-Time Meal?' : 'Complete Your Subscription'}
+        </h1>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
+          {/* Plan Summary Sidebar */}
+          <div className="lg:col-span-5 order-2 lg:order-1">
+            <div className="bg-white p-5 sm:p-7 rounded-2xl sm:rounded-[2rem] border border-gray-100 shadow-xl lg:sticky lg:top-24">
+              <h2 className="text-lg sm:text-xl font-bold text-gray-800 mb-4">Order Summary</h2>
+              <div className="p-4 sm:p-5 bg-gradient-to-br from-primary/5 to-orange-50 rounded-2xl mb-5 border border-primary/10">
+                <div className="flex justify-between items-center mb-3">
+                  <span className="font-bold text-base sm:text-lg text-gray-800">{plan.name}</span>
+                  <span className="font-extrabold text-lg sm:text-xl text-primary whitespace-nowrap">
+                    {isOneTime ? `$${plan.price.toFixed(2)} CAD` : `$${getAdjustedPrice().toFixed(2)}/mo CAD`}
+                  </span>
+                </div>
+                <ul className="space-y-2 text-xs sm:text-sm text-gray-600 mt-3">
+                  {plan.features.map((f: string, i: number) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <Check size={16} className="text-green-500 shrink-0 mt-0.5" />
+                      <span className="leading-snug">{f}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              {/* Promo Code Input */}
+              <div className="border-t border-gray-100 pt-4 mt-2">
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                  Promo / Coupon Code
+                </label>
+                {!appliedCoupon ? (
+                  <div className="relative flex items-center">
+                    <input
+                      type="text"
+                      placeholder="Enter code"
+                      className="w-full pl-3 pr-20 py-2.5 border border-gray-200 rounded-xl text-xs sm:text-sm font-semibold uppercase tracking-wider focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      value={couponInput}
+                      onChange={(e) => {
+                        setCouponInput(e.target.value);
+                        setCouponError('');
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleApplyCoupon}
+                      disabled={!couponInput || validatingCoupon}
+                      className="absolute right-1 px-3.5 sm:px-4 py-1.5 bg-slate-900 text-white text-xs font-bold rounded-lg hover:bg-slate-800 transition disabled:opacity-50"
+                    >
+                      {validatingCoupon ? '...' : 'Apply'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex justify-between items-center bg-green-50 border border-green-200/60 p-3 rounded-xl">
+                    <div>
+                      <span className="font-bold text-xs text-green-800 tracking-wider uppercase block">
+                        {appliedCoupon.code} Applied
+                      </span>
+                      <span className="text-[10px] text-green-600 font-medium whitespace-nowrap">
+                        {appliedCoupon.discountType === 'percentage' 
+                          ? `${appliedCoupon.discountValue}% discount` 
+                          : `$${appliedCoupon.discountValue.toFixed(2)} CAD discount`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRemoveCoupon}
+                      className="text-red-500 hover:text-red-700 text-xs font-bold"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+                {couponError && (
+                  <p className="text-red-500 text-xs mt-1.5 font-medium flex items-center gap-1">
+                    <AlertCircle size={12} /> {couponError}
+                  </p>
+                )}
+                {couponSuccess && (
+                  <p className="text-green-600 text-xs mt-1.5 font-medium flex items-center gap-1">
+                    <Check size={12} /> {couponSuccess}
+                  </p>
+                )}
+
+                {appliedCoupon && appliedCoupon.duration === 'repeating' && (
+                  <div className="mt-4 p-3.5 bg-orange-50 border border-orange-200/60 rounded-2xl space-y-3">
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="text-orange-500 shrink-0 mt-0.5" size={18} />
+                      <div>
+                        <h4 className="text-xs font-bold text-orange-950">Auto-Renewal Notice</h4>
+                        <p className="text-[11px] leading-relaxed text-orange-800 font-medium mt-1">
+                          This promo code <strong>{appliedCoupon.code}</strong> provides <strong>{appliedCoupon.durationInMonths} month(s) {appliedCoupon.discountValue === 100 ? 'free' : 'discounted'}</strong>.
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="pt-2 border-t border-orange-100 flex flex-col gap-2">
+                      <p className="text-xs font-bold text-orange-950 leading-snug">
+                        Do you want to continue with recurring payment automatically after the free period ends?
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRecurring(true);
+                            setLegalConsent(true);
+                          }}
+                          className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 ${
+                            isRecurring
+                              ? 'bg-orange-600 text-white shadow-sm'
+                              : 'bg-white border border-orange-200 text-orange-850 hover:bg-orange-100/50'
+                          }`}
+                        >
+                          <Check size={14} /> Yes, Auto-Renew
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleRemoveCoupon();
+                            setIsRecurring(false);
+                            setLegalConsent(false);
+                          }}
+                          className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 bg-white border border-orange-200 text-orange-850 hover:bg-orange-100/50`}
+                        >
+                          No, Cancel Discount
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-gray-100 pt-4 mt-4 space-y-2.5">
+                <div className="flex justify-between items-center text-xs sm:text-sm text-gray-600">
+                  <span className="font-medium">Subtotal</span>
+                  <span className="font-semibold text-gray-900 whitespace-nowrap">${getAdjustedPrice().toFixed(2)} CAD</span>
+                </div>
+
+                {appliedCoupon && (
+                  <div className="flex justify-between items-center text-xs sm:text-sm font-semibold text-green-600">
+                    <span>Discount ({appliedCoupon.code})</span>
+                    <span className="whitespace-nowrap">-${discountAmount.toFixed(2)} CAD</span>
+                  </div>
+                )}
+
+                <div className="flex justify-between items-center text-xs sm:text-sm text-gray-600">
+                  <span className="font-medium">
+                    Delivery Fee
+                    {!isOneTime && deliveryFee > 0 && (
+                      <span className="ml-1 text-[10px] text-gray-400 font-normal">
+                        {hasExplicitOneDayRate
+                          ? `(${selectedDeliveryDayCount} ${selectedDeliveryDayCount === 1 ? 'day' : 'days'} × $${oneDayDeliveryRate.toFixed(2)})`
+                          : `(${selectedDeliveryDayCount} of 6 days; legacy $${deliverySettings.deliveryFee.toFixed(2)} six-day fee)`}
+                      </span>
+                    )}
+                  </span>
+                  {deliveryFee > 0 ? (
+                    <span className="font-semibold text-orange-600 whitespace-nowrap">+${deliveryFee.toFixed(2)} CAD</span>
+                  ) : (
+                    <span className="font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-md text-xs">FREE</span>
+                  )}
+                </div>
+
+                <div className="flex justify-between items-center text-xs sm:text-sm text-gray-600">
+                  <span className="flex items-center gap-1 font-medium">
+                    <span>Platform Service Fee</span>
+                    <span className="text-[10px] text-gray-400 font-normal">(2.5% + $0.30)</span>
+                  </span>
+                  <span className="font-semibold text-gray-900 whitespace-nowrap">+${serviceFee.toFixed(2)} CAD</span>
+                </div>
+
+                {deliveryFee > 0 && (
+                  <p className="text-[10px] text-gray-400 font-bold leading-normal pt-1">
+                    Add ${(deliverySettings.minAmountForFreeDelivery - basePriceForDelivery).toFixed(2)} CAD more to unlock free delivery (minimum ${deliverySettings.minAmountForFreeDelivery} CAD).
+                  </p>
+                )}
+              </div>
+
+              <div className="flex justify-between items-center border-t border-gray-200 pt-4 mt-4">
+                <div>
+                  <span className="text-base sm:text-lg font-black text-gray-900 block">Total Due</span>
+                  <span className="text-[11px] sm:text-xs text-gray-400 font-medium">Delivery and platform fees included</span>
+                </div>
+                <div className="text-right">
+                  <div className="inline-flex items-baseline justify-end gap-1.5 whitespace-nowrap">
+                    <span className="text-2xl sm:text-3xl font-black text-gray-950 font-mono tracking-tight">
+                      ${totalAmount.toFixed(2)}
+                    </span>
+                    <span className="text-xs sm:text-sm font-bold text-gray-500 uppercase tracking-wider">CAD</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 bg-amber-50/70 border border-amber-200/80 p-3.5 rounded-2xl text-xs text-amber-900 flex items-start gap-2.5">
+                <Info size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  <strong>Platform Service Fee:</strong> A 2.5% service fee + $0.30 platform fee applies to every payment method, including Cash on Delivery.
+                </p>
+              </div>
+
+              {appliedCoupon && appliedCoupon.duration === 'repeating' && (
+                <p className="text-[10px] text-gray-400 font-bold text-right mt-2 leading-snug">
+                  Charges automatically renew at ${(getAdjustedPrice() + deliveryFee + Math.round((getAdjustedPrice() * 0.025 + 0.30) * 100) / 100).toFixed(2)} CAD/mo after {appliedCoupon.durationInMonths} month(s).
+                </p>
+              )}
+
+              <p className="text-[11px] text-gray-500 text-center mt-3 font-medium">
+                By subscribing, you agree to our{' '}
+                <Link to="/refund-policy" target="_blank" className="text-primary hover:underline font-bold">
+                  Refund & Cancellation Policy
+                </Link>.
+              </p>
+            </div>
+          </div>
+
+          {/* Main Content */}
+          <div className="lg:col-span-7 space-y-5 sm:space-y-6 order-1 lg:order-2">
+            {/* Delivery Address */}
+            <div className="bg-white p-5 sm:p-7 md:p-8 rounded-2xl sm:rounded-[2rem] border border-gray-100 shadow-xl">
+              <h2 className="text-lg sm:text-xl font-bold text-gray-800 mb-3 sm:mb-4 flex items-center gap-2">
+                <MapPin className="text-primary shrink-0" size={20} /> Delivery Address
+              </h2>
+              
+              {!address ? (
+                <button 
+                  onClick={() => setIsLocationPickerOpen(true)}
+                  className="w-full py-6 sm:py-8 border-2 border-dashed border-primary/30 bg-primary/5 rounded-2xl text-gray-700 hover:border-primary hover:bg-primary/10 transition-all duration-300 flex flex-col items-center justify-center gap-2.5 group cursor-pointer"
+                >
+                  <div className="p-3 bg-white text-primary rounded-full shadow-md group-hover:scale-110 transition-transform">
+                    <MapPin size={24} />
+                  </div>
+                  <div className="text-center px-4">
+                    <span className="font-bold text-sm text-gray-900 block">Select Delivery Location on Interactive Map</span>
+                    <span className="text-xs text-gray-500 mt-0.5 block">Search your address or pinpoint your exact home on map</span>
+                  </div>
+                </button>
+              ) : (
+                <div className="p-4 sm:p-5 bg-gray-50/80 rounded-2xl border border-gray-200/70 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] sm:text-xs text-gray-400 font-bold uppercase tracking-wider mb-1">Delivering To</p>
+                    <p className="text-gray-900 font-semibold text-xs sm:text-sm leading-relaxed break-words">{address}</p>
+                  </div>
+                  <button 
+                    onClick={() => setIsLocationPickerOpen(true)}
+                    className="shrink-0 px-4 py-2 bg-primary/10 hover:bg-primary/20 text-primary text-xs sm:text-sm font-bold rounded-xl transition cursor-pointer"
+                  >
+                    Change Map Pin
+                  </button>
+                </div>
+              )}
+
+              {/* Address Verification Feedback & Pricing Mismatch Banner */}
+              {address && addressMatch && (
+                <div className="mt-3.5 space-y-2">
+                  {isAddressUnsupported ? (
+                    <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl flex items-start gap-2.5 text-red-900 animate-in fade-in">
+                      <AlertTriangle size={18} className="text-red-500 shrink-0 mt-0.5" />
+                      <div className="flex-1 text-xs">
+                        <strong className="block text-red-800 uppercase tracking-wider text-[11px] font-black">
+                          Delivery Unavailable For This Address
+                        </strong>
+                        <p className="mt-0.5 leading-relaxed text-red-700">
+                          {addressMatch.error || 'This address is outside our delivery zones. Ghar Ki Rasoee only delivers to configured cities in British Columbia.'}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setIsLocationPickerOpen(true)}
+                          className="mt-2 text-xs font-bold text-red-700 hover:text-red-900 underline cursor-pointer"
+                        >
+                          Select a different address on map
+                        </button>
+                      </div>
+                    </div>
+                  ) : isAddressMismatch ? (
+                    <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-900 shadow-sm animate-in fade-in">
+                      <div className="flex items-start gap-2.5 flex-1">
+                        <AlertTriangle size={20} className="text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="text-xs font-black uppercase tracking-wider text-amber-900">
+                            Pricing Tier &amp; Delivery City Mismatch
+                          </h4>
+                          <p className="text-xs mt-0.5 leading-relaxed text-amber-800">
+                            Your delivery address is in <strong>{addressMatch.city}</strong> ({addressMatch.categoryName}), but your plan was selected for <strong>{selectedCity}</strong> ({cityCategories[selectedCategory || 'local']?.name || 'Local Cities'}).
+                          </p>
+                          <p className="text-[11px] text-amber-700 mt-1 font-semibold">
+                            Please update your selected city to apply the correct subscription price and delivery rules.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleSyncCityAndPrice}
+                        className="shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <span>Switch to {addressMatch.city} &amp; Update Pricing</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-800 font-semibold">
+                      <span className="flex items-center gap-1.5">
+                        <Check size={14} className="text-emerald-600" />
+                        <span>Address verified: Delivering to {addressMatch.city}</span>
+                      </span>
+                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 bg-emerald-200/60 rounded-full">
+                        {addressMatch.categoryName}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Contact Details & Delivery Notes */}
+            <div className="bg-white p-5 sm:p-7 md:p-8 rounded-2xl sm:rounded-[2rem] border border-gray-100 shadow-xl space-y-4">
+              <h2 className="text-lg sm:text-xl font-bold text-gray-800 mb-1 flex items-center gap-2">
+                <Phone className="text-primary shrink-0" size={20} /> Contact Details & Notes
+              </h2>
+              <p className="text-xs sm:text-sm text-gray-500 mb-4">Required so our delivery drivers can contact you when arriving with your meals.</p>
+              
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5">
+                  Phone Number <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="tel"
+                  required
+                  value={customerPhone}
+                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  placeholder="e.g. +1 604-xxx-xxxx"
+                  className="w-full px-4 py-2.5 sm:py-3 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                  <MessageSquare size={12} /> Special Instructions (Optional)
+                </label>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="e.g. Leave at door, buzz code #1234, extra spicy..."
+                  rows={2}
+                  className="w-full px-4 py-2.5 sm:py-3 border border-gray-200 rounded-xl text-xs sm:text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition resize-none"
+                />
+              </div>
+            </div>
+
+            {/* Delivery Days Selection */}
+            {!isOneTime && (
+              <div className="bg-white p-5 sm:p-7 md:p-8 rounded-2xl sm:rounded-[2rem] border border-gray-100 shadow-xl space-y-4">
+                <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center gap-2">
+                  <Calendar className="text-primary shrink-0" size={22} /> Delivery Schedule
+                </h2>
+                <p className="text-xs sm:text-sm text-gray-500 leading-relaxed">
+                  Choose which days of the week you would like to receive deliveries. The price of your subscription scales dynamically based on the frequency.
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3 pt-2">
+                  {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].map((day) => {
+                    const isSelected = selectedDays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => {
+                          if (appliedCoupon) {
+                            setAppliedCoupon(null);
+                            setCouponInput('');
+                            setCouponSuccess('');
+                            setCouponError('Delivery schedule changed. Please apply your coupon again.');
+                          }
+                          if (isSelected) {
+                            setSelectedDays(selectedDays.filter((d) => d !== day));
+                          } else {
+                            setSelectedDays([...selectedDays, day]);
+                          }
+                        }}
+                        className={`py-2.5 sm:py-3 px-3 sm:px-4 rounded-xl border-2 font-semibold text-xs sm:text-sm transition-all duration-200 capitalize flex items-center justify-between ${
+                          isSelected
+                            ? 'border-primary bg-primary/5 text-primary shadow-sm shadow-primary/5'
+                            : 'border-gray-100 hover:border-gray-200 text-gray-600'
+                        }`}
+                      >
+                        <span>{day}</span>
+                        {isSelected ? (
+                          <Check size={16} className="text-primary shrink-0" />
+                        ) : (
+                          <div className="w-4 h-4 rounded-full border border-gray-300 shrink-0" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedDays.length === 0 && (
+                  <p className="text-red-500 text-xs font-semibold flex items-center gap-1 mt-2">
+                    <AlertCircle size={14} /> Please select at least one delivery day.
+                  </p>
+                )}
+                <p className="text-[11px] sm:text-xs text-gray-400 font-medium bg-gray-50 p-3 rounded-xl border border-gray-200/50 mt-3">
+                  💡 <strong>Tip:</strong> If you select fewer days, your monthly billing will decrease proportionally.
+                </p>
+              </div>
+            )}
+
+            {/* Delivery Schedule Information Ticket */}
+            <div className="bg-[#f0fdf4] border-2 border-green-200/80 p-5 sm:p-6 rounded-2xl sm:rounded-[2rem] shadow-sm space-y-3 relative overflow-hidden">
+              <div className="flex items-center gap-3 border-b border-green-200 pb-3">
+                <div className="w-10 h-10 rounded-xl bg-green-600 text-white flex items-center justify-center shadow-md shadow-green-600/20 shrink-0">
+                  <Truck size={22} strokeWidth={2.5} />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-green-700 block">
+                    {isOneTime ? 'Scheduled Meal Delivery (8:00 AM)' : 'First Scheduled Delivery (8:00 AM)'}
+                  </span>
+                  <h4 className="text-base sm:text-lg font-black text-gray-900 mt-0.5">
+                    {estimatedSchedule.formattedDate} at 8:00 AM
+                  </h4>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs font-semibold text-gray-700 pt-1">
+                <div className="flex items-center gap-2 bg-white/80 border border-green-100 p-2.5 rounded-xl">
+                  <Clock size={16} className="text-green-600 shrink-0" />
+                  <div>
+                    <span className="text-[10px] text-gray-400 block font-bold">DAILY CUTOFF</span>
+                    <span>10:00 PM</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 bg-white/80 border border-green-100 p-2.5 rounded-xl">
+                  <Calendar size={16} className="text-green-600 shrink-0" />
+                  <div>
+                    <span className="text-[10px] text-gray-400 block font-bold">DELIVERY DAYS</span>
+                    <span>Mon – Sat (8:00 AM)</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 bg-white/80 border border-green-100 p-2.5 rounded-xl">
+                  <span className="text-sm">🛑</span>
+                  <div>
+                    <span className="text-[10px] text-gray-400 block font-bold">SUNDAY</span>
+                    <span className="text-red-600">Off (No Deliveries)</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white border border-green-200 p-3 rounded-xl text-xs font-medium text-gray-800 shadow-sm leading-relaxed">
+                {estimatedSchedule.isAfterCutoff 
+                  ? `🌙 Placed after 10:00 PM cutoff: Next prep window scheduled for delivery on ${estimatedSchedule.formattedDate} at 8:00 AM.`
+                  : `✅ Placed before 10:00 PM cutoff: Next prep window scheduled for delivery on ${estimatedSchedule.formattedDate} at 8:00 AM.`}
+              </div>
+            </div>
+
+            {/* Payment Section */}
+            <form onSubmit={handleCheckout} className="bg-white p-6 sm:p-8 rounded-[2rem] border border-gray-100 shadow-xl space-y-6">
+              <h2 className="text-xl font-bold text-gray-800 mb-4">Choose Payment Method</h2>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Stripe Pay option */}
+                <label className={`p-4 border-2 rounded-2xl cursor-pointer transition-all flex items-center gap-4 ${
+                  paymentMethod === 'Stripe'
+                    ? 'border-primary bg-primary/5 shadow-md shadow-primary/5'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input 
+                    type="radio" 
+                    name="paymentMethod" 
+                    value="Stripe" 
+                    checked={paymentMethod === 'Stripe'} 
+                    onChange={() => setPaymentMethod('Stripe')}
+                    className="text-primary focus:ring-primary h-5 w-5"
+                  />
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2.5 rounded-xl ${paymentMethod === 'Stripe' ? 'bg-primary text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      <CreditCard size={20} />
+                    </div>
+                    <div>
+                      <span className="font-bold text-gray-900 block">Credit/Debit Card</span>
+                      <span className="text-xs text-gray-400">Secure pay via Stripe</span>
+                    </div>
+                  </div>
+                </label>
+
+                {/* Cash on Delivery option */}
+                <label className={`p-4 border-2 rounded-2xl cursor-pointer transition-all flex items-center gap-4 ${
+                  paymentMethod === 'COD'
+                    ? 'border-primary bg-primary/5 shadow-md shadow-primary/5'
+                    : 'border-gray-200 hover:border-gray-300'
+                }`}>
+                  <input 
+                    type="radio" 
+                    name="paymentMethod" 
+                    value="COD" 
+                    checked={paymentMethod === 'COD'} 
+                    onChange={() => setPaymentMethod('COD')}
+                    className="text-primary focus:ring-primary h-5 w-5"
+                  />
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2.5 rounded-xl ${paymentMethod === 'COD' ? 'bg-primary text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      <DollarSign size={20} />
+                    </div>
+                    <div>
+                      <span className="font-bold text-gray-900 block">Cash on Delivery</span>
+                      <span className="text-xs text-gray-500">{isOneTime ? 'Pay when delivered' : 'Admin approval starts deliveries. Payment is confirmed separately.'}</span>
+                    </div>
+                  </div>
+                </label>
+              </div>
+
+              {/* Subscription option section - only show for subscription plans */}
+              {!isOneTime && paymentMethod === 'Stripe' && (
+                <div className="bg-gray-50 p-6 rounded-2xl border border-gray-200/60 space-y-4">
+                  <h3 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Subscription Option</h3>
+                  
+                  <div className="space-y-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input 
+                        type="radio" 
+                        name="recurringOption" 
+                        checked={isRecurring} 
+                        onChange={() => setIsRecurring(true)}
+                        className="text-primary focus:ring-primary h-4 w-4"
+                      />
+                      <div>
+                        <span className="text-sm font-bold text-gray-900 block">Auto-Renewing Subscription (Recurring)</span>
+                        <span className="text-xs text-gray-500">Automatically renews and charges your card every month. Cancel anytime.</span>
+                      </div>
+                    </label>
+
+                    <label className={`flex items-center gap-3 cursor-pointer ${appliedCoupon?.duration === 'repeating' ? 'opacity-60 cursor-not-allowed' : ''}`}>
+                       <input 
+                         type="radio" 
+                         name="recurringOption" 
+                         checked={!isRecurring} 
+                         disabled={appliedCoupon?.duration === 'repeating'}
+                         onChange={() => {
+                           setIsRecurring(false);
+                           setLegalConsent(false);
+                         }}
+                         className="text-primary focus:ring-primary h-4 w-4"
+                       />
+                       <div>
+                         <span className="text-sm font-bold text-gray-900 block">One-Time Payment (30 Days access)</span>
+                         <span className="text-xs text-gray-500">
+                           Non-recurring. You will need to manually renew the plan at the end of 30 days.
+                           {appliedCoupon?.duration === 'repeating' && (
+                             <span className="text-red-500 font-bold block mt-0.5">
+                               ⚠️ Multi-month discount coupon requires auto-renewal
+                             </span>
+                           )}
+                         </span>
+                       </div>
+                     </label>
+                  </div>
+
+                  {isRecurring && (
+                    <div className="pt-3 border-t border-gray-200/60">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={legalConsent}
+                          disabled={appliedCoupon?.duration === 'repeating'}
+                          onChange={(e) => setLegalConsent(e.target.checked)}
+                          className="mt-1 h-4 w-4 rounded text-primary focus:ring-primary border-gray-300"
+                        />
+                        <span className="text-xs text-gray-600 leading-relaxed">
+                          I authorize Ghar Ki Rasoee to save my payment details and automatically charge my card{" "}
+                          {appliedCoupon && appliedCoupon.duration === 'repeating' ? (
+                            <span className="font-semibold text-gray-900">
+                              ${totalAmount.toFixed(2)} CAD for the first {appliedCoupon.durationInMonths} month(s), and then ${(getAdjustedPrice() + deliveryFee).toFixed(2)} CAD
+                            </span>
+                          ) : (
+                            <span className="font-semibold text-gray-900">
+                              ${totalAmount.toFixed(2)} CAD
+                            </span>
+                          )}{" "}
+                          on a monthly recurring basis until cancelled. I can cancel or pause my auto-renewal subscription at any time from my account dashboard.
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {error && (
+                <div className="p-4 bg-red-50 border border-red-200 text-red-600 text-sm rounded-xl flex items-center gap-2">
+                  <AlertCircle size={18} className="shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              {currentPlan?.customDetails?.isCustomPlan && (customQuoteLoading || customQuoteError) && (
+                <div className={`p-4 border text-sm rounded-xl flex items-center gap-2 ${customQuoteError ? 'bg-red-50 border-red-200 text-red-600' : 'bg-blue-50 border-blue-200 text-blue-700'}`}>
+                  {customQuoteLoading ? <span className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin shrink-0" /> : <AlertCircle size={18} className="shrink-0" />}
+                  <span>{customQuoteLoading ? 'Updating your custom plan price…' : customQuoteError}</span>
+                </div>
+              )}
+
+              {paymentMethod === 'Stripe' ? (
+                <div className="bg-blue-50/50 border border-blue-200/60 p-4 rounded-2xl text-sm text-blue-800 flex gap-3">
+                  <ShieldCheck className="shrink-0 text-blue-600 mt-0.5" size={20} />
+                  <p className="leading-relaxed">
+                    Stripe Checkout will securely handle your payment. We do not store or see your card details. Apple Pay and Google Pay will be auto-enabled if supported.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-amber-50/50 border border-amber-200/60 p-4 rounded-2xl text-sm text-amber-800 flex gap-3">
+                  <AlertCircle className="shrink-0 text-amber-600 mt-0.5" size={20} />
+                  <p className="leading-relaxed">
+                    You can pay using cash or Interac e-Transfer when the food is delivered.
+                  </p>
+                </div>
+              )}
+
+              {/* Mandatory Cancellation Policy & Terms Checkpoint */}
+              <div className="p-4 sm:p-5 bg-slate-50 border border-slate-200/90 rounded-2xl shadow-sm">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input 
+                    type="checkbox"
+                    required
+                    checked={termsAccepted}
+                    onChange={(e) => setTermsAccepted(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded text-primary focus:ring-primary border-gray-300 shrink-0 cursor-pointer"
+                  />
+                  <span className="text-xs text-gray-700 leading-relaxed font-medium select-none">
+                    By clicking "{isOneTime ? (paymentMethod === 'Stripe' ? `Pay $${totalAmount.toFixed(2)} CAD` : 'Place Order') : (paymentMethod === 'Stripe' ? `Pay $${totalAmount.toFixed(2)} CAD` : 'Confirm Subscription')}", you agree to our{' '}
+                    <Link to="/refund-policy" target="_blank" className="text-primary hover:underline font-bold">
+                      Terms of Service
+                    </Link>{' '}
+                    and understand that all food orders are final. No refunds are given for cancellations or accidental orders once preparation begins.
+                  </span>
+                </label>
+              </div>
+
+              <button 
+                type="submit"
+                disabled={loading || customQuoteLoading || !!customQuoteError || !address || !termsAccepted || isAddressMismatch || isAddressUnsupported}
+                className="w-full bg-primary text-white py-4 rounded-2xl font-bold hover:bg-primary-hover transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center shadow-lg shadow-primary/20 hover:-translate-y-0.5 cursor-pointer"
+              >
+                {loading ? (
+                  <span className="w-6 h-6 border-3 border-white border-t-transparent rounded-full animate-spin"></span>
+                ) : isAddressMismatch ? (
+                  `Resolve City Mismatch to Proceed`
+                ) : isAddressUnsupported ? (
+                  `Address Outside Delivery Area`
+                ) : isOneTime ? (
+                  paymentMethod === 'Stripe'
+                    ? `Pay $${totalAmount.toFixed(2)} CAD`
+                    : 'Place Order (COD)'
+                ) : (
+                  paymentMethod === 'Stripe' 
+                    ? `Pay $${totalAmount.toFixed(2)} CAD` 
+                    : 'Confirm Subscription (COD)'
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+      
+      <LocationPicker 
+        isOpen={isLocationPickerOpen}
+        onClose={() => setIsLocationPickerOpen(false)}
+        onSelect={(loc: SelectedLocationData) => {
+          setAddress(loc.address);
+          if (loc.detectedCity) {
+            selectCity(loc.detectedCity);
+          }
+        }}
+      />
+
+      {/* Warning Modal */}
+      {showWarningModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-4">
+          <div className="bg-white rounded-[2rem] max-w-lg w-full p-6 md:p-8 border border-red-100 shadow-2xl relative">
+            <button 
+              type="button"
+              onClick={() => setShowWarningModal(false)}
+              className="absolute top-4 right-4 p-2 rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <X size={20} />
+            </button>
+
+            <div className="flex flex-col items-center mt-2">
+              <div className="w-14 h-14 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-4 border border-red-100 shadow-sm">
+                <AlertTriangle size={28} />
+              </div>
+
+              <h3 className="text-xl md:text-2xl font-black text-gray-950 tracking-tight leading-snug text-center">
+                Active Subscription Detected
+              </h3>
+              <p className="text-xs text-gray-500 font-medium mt-1 text-center">
+                You already have an active meal subscription. Choose how you want to proceed.
+              </p>
+              
+              <div className="mt-6 space-y-3 w-full">
+                {/* Option 1: Add Plan */}
+                <button
+                  type="button"
+                  onClick={handleProceedAdd}
+                  className="w-full text-left p-4 rounded-2xl border-2 border-primary bg-primary/[0.02] hover:bg-primary/[0.05] transition-all flex items-start gap-3.5 group"
+                >
+                  <div className="p-2 bg-primary text-white rounded-xl mt-0.5 shrink-0">
+                    <Check size={18} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-extrabold text-sm text-gray-900 group-hover:text-primary transition-colors">
+                        Add as Additional Plan (Multi-Plan)
+                      </span>
+                      <span className="px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-black rounded-full">
+                        Recommended
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-1 leading-relaxed font-semibold">
+                      Keep your current plan running continuously. Both plans will active together under your account (ideal for parents, siblings, or another home).
+                    </p>
+                  </div>
+                </button>
+
+                {/* Option 2: Replace Plan */}
+                <button
+                  type="button"
+                  onClick={handleProceedReplace}
+                  className="w-full text-left p-4 rounded-2xl border-2 border-red-200 bg-red-50/[0.01] hover:bg-red-50/[0.04] transition-all flex items-start gap-3.5 group animate-pulse"
+                >
+                  <div className="p-2 bg-red-100 text-red-650 rounded-xl mt-0.5 border border-red-200 shrink-0">
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div className="w-full">
+                    <span className="font-extrabold text-sm text-gray-900 group-hover:text-red-600 transition-colors block">
+                      Replace Current Plan
+                    </span>
+                    <p className="text-[11px] text-gray-500 mt-1 leading-relaxed font-semibold">
+                      Automatically cancel and replace your current active plan.
+                    </p>
+                    <div className="mt-2.5 p-3 bg-red-50 border border-red-200 rounded-xl text-[10.5px] text-red-800 font-extrabold leading-relaxed shadow-inner">
+                      ⚠️ Please note: If you proceed with this new purchase, your current plan will be automatically canceled and replaced.
+                      <div className="mt-1 text-red-900 font-black">
+                        No refund or return of money will be provided for any remaining days of your previous plan.
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </div>
+
+              <div className="w-full mt-5 pt-3 border-t border-gray-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowWarningModal(false)}
+                  className="px-5 py-2.5 bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold rounded-xl text-xs transition-all"
+                >
+                  Cancel & Go Back
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </PageContainer>
+  );
+};
+
+export default SubscriptionCheckout;
