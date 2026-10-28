@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { ENV } from '../../../config/env.config';
 import PageContainer from '../../../components/layout/PageContainer';
 import { useCity } from '../../../context/CityContext';
+import NumberInput from '../../../components/common/NumberInput';
 
 type Frequency = 'none' | 'threePerWeek' | 'daily';
 type SweetFrequency = 'none' | 'twicePerWeek';
@@ -34,6 +35,7 @@ interface Adjustment {
   quantity?: number;
   total: number;
   frequency?: string;
+  unitAmount?: number;
 }
 
 interface Quote {
@@ -326,7 +328,12 @@ const CustomizePlan: React.FC = () => {
                     Fresh handmade tawa rotis delivered with your schedule. No order limit!
                   </p>
                 </div>
-                <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {quote?.additions?.find(a => a.item === 'roti')?.unitAmount !== undefined && (
+                    <span className="inline-block text-xs font-extrabold text-amber-900 bg-amber-100/90 border border-amber-300/80 px-3 py-1 rounded-full shadow-2xs">
+                      {money(quote.additions.find(a => a.item === 'roti')?.unitAmount || 0, quote.currency)} / roti
+                    </span>
+                  )}
                   <span className="inline-block text-xs font-bold text-amber-900 bg-amber-100/80 border border-amber-300/60 px-3 py-1 rounded-full">
                     {selections.roti} Rotis / Delivery
                   </span>
@@ -346,11 +353,10 @@ const CustomizePlan: React.FC = () => {
                 </button>
 
                 <div className="relative flex-1">
-                  <input
-                    type="number"
-                    min="1"
+                  <NumberInput
+                    min={1}
                     value={selections.roti}
-                    onChange={e => setCount('roti', Number(e.target.value))}
+                    onChange={val => setCount('roti', val)}
                     className="w-full text-center rounded-xl border-2 border-amber-300 bg-white py-2.5 text-lg sm:text-xl font-extrabold text-gray-900 focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 focus:outline-none shadow-inner"
                   />
                   <span className="absolute right-3 top-3.5 text-xs text-gray-400 font-medium pointer-events-none">
@@ -416,12 +422,11 @@ const CustomizePlan: React.FC = () => {
                         <Minus size={16} />
                       </button>
 
-                      <input
-                        type="number"
-                        min="0"
+                      <NumberInput
+                        min={0}
                         max={key === 'roti' ? undefined : 40}
                         value={selections[key]}
-                        onChange={e => setCount(key, Number(e.target.value))}
+                        onChange={val => setCount(key, val)}
                         className="w-full text-center rounded-lg border bg-white py-2 text-sm sm:text-base font-bold focus:ring-2 focus:ring-primary/20 focus:outline-none"
                       />
 

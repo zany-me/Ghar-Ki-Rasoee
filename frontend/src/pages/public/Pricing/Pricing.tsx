@@ -8,6 +8,7 @@ import axios from 'axios';
 import { ENV } from '../../../config/env.config';
 import { X, Check, Loader2, Plus, Minus, Clock, Truck, ArrowRight, Utensils, Info } from 'lucide-react';
 import { getNextDeliverySchedule } from '../../../utils/deliverySchedule';
+import NumberInput from '../../../components/common/NumberInput';
 
 const dayNames: Record<string, string> = {
   monday: 'Monday',
@@ -413,15 +414,10 @@ const Pricing: React.FC = () => {
                               </button>
                               
                               <div className="flex items-center bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-inner focus-within:ring-2 focus-within:ring-primary/20">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  value={selectedRoti === 0 ? '' : selectedRoti}
-                                  placeholder="0"
-                                  onChange={(e) => {
-                                    const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
-                                    setSelectedRoti(isNaN(val) ? 0 : Math.max(0, val));
-                                  }}
+                                <NumberInput
+                                  min={0}
+                                  value={selectedRoti}
+                                  onChange={(val) => setSelectedRoti(val)}
                                   className="w-12 text-center font-bold text-lg text-slate-900 bg-transparent focus:outline-none"
                                 />
                                 <span className="text-[10px] font-bold uppercase text-slate-400">Rotis</span>
@@ -544,15 +540,10 @@ const Pricing: React.FC = () => {
                                     </button>
 
                                     <div className="flex items-center bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 shadow-inner focus-within:ring-2 focus-within:ring-primary/20">
-                                      <input
-                                        type="number"
-                                        min="0"
-                                        value={count === 0 ? '' : count}
-                                        placeholder="0"
-                                        onChange={(e) => {
-                                          const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
-                                          setDishCount(sabzi, isNaN(val) ? 0 : Math.max(0, val));
-                                        }}
+                                      <NumberInput
+                                        min={0}
+                                        value={count}
+                                        onChange={(val) => setDishCount(sabzi, val)}
                                         className="w-10 text-center font-black text-sm sm:text-base text-slate-900 bg-transparent focus:outline-none"
                                       />
                                       <span className="text-[9px] font-bold uppercase text-slate-400">Box</span>

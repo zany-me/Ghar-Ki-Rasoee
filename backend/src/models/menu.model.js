@@ -33,6 +33,9 @@ class MenuModel {
       dal: 55,
       rice: 40,
     },
+    scratchRotiPrice: 8,
+    scratchBasePrice: 0,
+    scratchDefaultRoti: 8,
   };
 
   static normalizePricingConfig(raw = {}) {
@@ -41,6 +44,19 @@ class MenuModel {
       ...raw,
       pricingVersion: 2,
       basePrice: raw.basePrice ?? defaults.basePrice,
+      scratchRotiPrice: Number.isFinite(Number(raw.scratchRotiPrice))
+        ? Number(raw.scratchRotiPrice)
+        : (raw.scratch?.rotiPrice !== undefined && Number.isFinite(Number(raw.scratch.rotiPrice))
+            ? Number(raw.scratch.rotiPrice)
+            : (defaults.scratchRotiPrice ?? defaults.addition.roti ?? 8)),
+      scratchBasePrice: raw.scratchBasePrice !== undefined && Number.isFinite(Number(raw.scratchBasePrice))
+        ? Number(raw.scratchBasePrice)
+        : (raw.scratch?.basePrice !== undefined && Number.isFinite(Number(raw.scratch.basePrice))
+            ? Number(raw.scratch.basePrice)
+            : undefined),
+      scratchDefaultRoti: Number.isInteger(Number(raw.scratchDefaultRoti)) && Number(raw.scratchDefaultRoti) > 0
+        ? Number(raw.scratchDefaultRoti)
+        : (defaults.scratchDefaultRoti ?? 8),
       removal: {
         ...defaults.removal,
         ...(raw.removal || {}),
@@ -651,7 +667,13 @@ class MenuModel {
     for (const item of ["roti", "sabji", "dal", "rice"]) {
       const difference = selected[item] - Number(baseComponents[item] || 0);
       if (difference < 0) addLine(removals, item, -difference, rules.removal?.[item]);
-      if (difference > 0) addLine(additions, item, difference, rules.addition?.[item]);
+      if (difference > 0) {
+        let rate = rules.addition?.[item];
+        if (basePlan === "scratch" && item === "roti" && rules.scratchRotiPrice !== undefined && rules.scratchRotiPrice !== null) {
+          rate = rules.scratchRotiPrice;
+        }
+        addLine(additions, item, difference, rate);
+      }
     }
     for (const [field, item] of [["raitaFrequency", "raita"], ["saladFrequency", "salad"], ["sweetDishFrequency", "sweetDish"]]) {
       const before = baseComponents[field] || "none";
@@ -669,9 +691,14 @@ class MenuModel {
     const resolvedCity = city || customDetails.city || null;
     const categoryKey = this.getCityCategory(resolvedCity, normalizedConfig);
     const categoryPrices = normalizedConfig.cityCategories?.[categoryKey]?.planPrices;
-    const rawBasePrice = basePlan === "scratch"
-      ? (categoryPrices?.customizableBase ?? rules.basePrice)
-      : (categoryPrices?.[basePlan] ?? normalizedConfig.plans?.[basePlan]?.price);
+    let rawBasePrice;
+    if (basePlan === "scratch") {
+      rawBasePrice = rules.scratchBasePrice !== undefined && rules.scratchBasePrice !== null
+        ? rules.scratchBasePrice
+        : (categoryPrices?.customizableBase ?? rules.basePrice);
+    } else {
+      rawBasePrice = categoryPrices?.[basePlan] ?? normalizedConfig.plans?.[basePlan]?.price;
+    }
     const baseCents = toCents(rawBasePrice, "Base package");
     const removalCents = removals.reduce((sum, line) => sum + Math.round(line.total * 100), 0);
     const additionCents = additions.reduce((sum, line) => sum + Math.round(line.total * 100), 0);
@@ -731,6 +758,12 @@ class MenuModel {
     inspectRates(normalized.customPricingConfig.removal, "removal");
     inspectRates(normalized.customPricingConfig.addition, "addition");
     toFinitePrice(normalized.customPricingConfig.basePrice, "basePrice");
+    if (normalized.customPricingConfig.scratchRotiPrice !== undefined) {
+      toFinitePrice(normalized.customPricingConfig.scratchRotiPrice, "scratchRotiPrice");
+    }
+    if (normalized.customPricingConfig.scratchBasePrice !== undefined) {
+      toFinitePrice(normalized.customPricingConfig.scratchBasePrice, "scratchBasePrice");
+    }
     validateDeliverySettings(normalized.deliveryFeeSettings, "deliveryFeeSettings");
     for (const [categoryKey, category] of Object.entries(normalized.cityCategories || {})) {
       validateDeliverySettings(category.deliveryFeeSettings, `cityCategories.${categoryKey}.deliveryFeeSettings`);

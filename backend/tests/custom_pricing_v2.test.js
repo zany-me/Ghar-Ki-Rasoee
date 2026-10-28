@@ -125,6 +125,35 @@ describe("custom subscription pricing v2", () => {
     expect(quote.customizedSubtotal).toBe(1200);
   });
 
+  it("uses dedicated scratchRotiPrice specifically for build-from-scratch", () => {
+    const customScratchConfig = MenuModel.normalizeMenuConfig({
+      ...config,
+      customPricingConfig: {
+        ...config.customPricingConfig,
+        scratchBasePrice: 0,
+        scratchRotiPrice: 10.5,
+        addition: { ...config.customPricingConfig.addition, roti: 8 }
+      }
+    });
+
+    const scratchQuote = MenuModel.quoteCustomPlan({
+      basePlan: "scratch",
+      selections: { roti: 8, sabji: 0, dal: 0, rice: 0 }
+    }, customScratchConfig);
+
+    // 8 rotis * $10.50 = $84
+    expect(scratchQuote.basePackagePrice).toBe(0);
+    expect(scratchQuote.additionTotal).toBe(84);
+    expect(scratchQuote.customizedSubtotal).toBe(84);
+
+    // Verify standard plan addition still uses addition.roti ($8)
+    const standardQuote = MenuModel.quoteCustomPlan({
+      basePlan: "basic",
+      selections: { roti: 5 }
+    }, customScratchConfig);
+    expect(standardQuote.additionTotal).toBe(8);
+  });
+
   it("rejects build-from-scratch if no meal items or additions were chosen", () => {
     const scratchConfig = MenuModel.normalizeMenuConfig({
       ...config,
@@ -137,3 +166,4 @@ describe("custom subscription pricing v2", () => {
     }, scratchConfig)).toThrow("Please select at least one meal item to build your plan");
   });
 });
+

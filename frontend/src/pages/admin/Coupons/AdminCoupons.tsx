@@ -14,6 +14,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import NumberInput from '../../../components/common/NumberInput';
 
 interface CouponItem {
   code: string;
@@ -419,15 +420,15 @@ const AdminCoupons: React.FC = () => {
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 font-semibold text-sm">
                       {discountType === 'percentage' ? <Percent size={14} /> : <DollarSign size={14} />}
                     </span>
-                    <input
-                      type="number"
+                    <NumberInput
                       required
-                      min="0.01"
+                      min={0.01}
                       step="any"
+                      allowEmpty={true}
                       placeholder={discountType === 'percentage' ? '15' : '10.00'}
                       className="w-full pl-8 pr-3.5 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/20 text-sm font-semibold"
                       value={discountValue}
-                      onChange={(e) => setDiscountValue(e.target.value)}
+                      onChange={(_, raw) => setDiscountValue(raw ?? '')}
                     />
                   </div>
                 </div>
@@ -436,14 +437,14 @@ const AdminCoupons: React.FC = () => {
                   <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                     Min Purchase ($ CAD)
                   </label>
-                  <input
-                    type="number"
-                    min="0"
+                  <NumberInput
+                    min={0}
                     step="any"
+                    allowEmpty={true}
                     placeholder="0.00"
                     className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/20 text-sm font-semibold"
                     value={minOrderAmount}
-                    onChange={(e) => setMinOrderAmount(e.target.value)}
+                    onChange={(_, raw) => setMinOrderAmount(raw ?? '')}
                   />
                 </div>
 
@@ -451,15 +452,15 @@ const AdminCoupons: React.FC = () => {
                   <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                     Max Discount ($ CAD)
                   </label>
-                  <input
-                    type="number"
-                    min="0"
+                  <NumberInput
+                    min={0}
                     step="any"
                     disabled={discountType === 'fixed'}
+                    allowEmpty={true}
                     placeholder="Unlimited"
                     className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/20 text-sm font-semibold disabled:bg-gray-50 disabled:opacity-50"
                     value={maxDiscountAmount}
-                    onChange={(e) => setMaxDiscountAmount(e.target.value)}
+                    onChange={(_, raw) => setMaxDiscountAmount(raw ?? '')}
                   />
                 </div>
 
@@ -480,13 +481,14 @@ const AdminCoupons: React.FC = () => {
                    <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                      Max Usage Limit
                    </label>
-                   <input
-                     type="number"
-                     min="1"
+                   <NumberInput
+                     min={1}
+                     step={1}
+                     allowEmpty={true}
                      placeholder="Unlimited"
                      className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/20 text-sm font-semibold"
                      value={maxUses}
-                     onChange={(e) => setMaxUses(e.target.value)}
+                     onChange={(_, raw) => setMaxUses(raw ?? '')}
                    />
                  </div>
 
@@ -509,14 +511,15 @@ const AdminCoupons: React.FC = () => {
                    <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
                      Duration in Months
                    </label>
-                   <input
-                     type="number"
-                     min="1"
+                   <NumberInput
+                     min={1}
+                     step={1}
                      disabled={duration !== 'repeating'}
+                     allowEmpty={true}
                      placeholder="e.g. 2 months"
                      className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/20 text-sm font-semibold disabled:bg-gray-50 disabled:opacity-50"
                      value={durationInMonths}
-                     onChange={(e) => setDurationInMonths(e.target.value)}
+                     onChange={(_, raw) => setDurationInMonths(raw ?? '')}
                    />
                  </div>
                </div>

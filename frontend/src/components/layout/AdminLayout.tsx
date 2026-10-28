@@ -135,7 +135,7 @@ const AdminLayout: React.FC = () => {
           isSidebarOpen ? 'md:ml-64 ml-0' : 'md:ml-20 ml-0'
         } pt-20 md:pt-0`}
       >
-        <div className="p-4 sm:p-6 md:p-8 max-w-7xl mx-auto">
+        <div className="p-4 sm:p-6 md:p-8 lg:p-10 w-full max-w-[1800px] mx-auto">
           <Outlet />
         </div>
       </main>
