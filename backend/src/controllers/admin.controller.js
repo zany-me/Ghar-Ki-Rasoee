@@ -262,9 +262,22 @@ class AdminController {
         .get();
       const deliveries = [];
 
+      const DeliveryScheduleUtil = require("../utils/deliverySchedule.util");
+
       for (const doc of subscriptionsSnapshot.docs) {
         const sub = doc.data();
         if (sub.skippedDates && sub.skippedDates.includes(todayStr)) continue;
+
+        // Skip if first delivery date has not arrived yet, or ordered today after morning delivery
+        const firstDelivery = sub.firstDeliveryDate || (sub.startDate ? sub.startDate.split("T")[0] : null);
+        if (firstDelivery && firstDelivery > todayStr) continue;
+
+        if (sub.createdAt) {
+          const createdSchedule = DeliveryScheduleUtil.getNextDeliveryDate(sub.createdAt, sub.deliveryDays);
+          if (createdSchedule.deliveryDate > todayStr && (!sub.startDate || sub.startDate.split("T")[0] >= todayStr)) {
+            continue;
+          }
+        }
 
         if (sub.deliveryDays && Array.isArray(sub.deliveryDays) && sub.deliveryDays.length > 0) {
           const isScheduled = sub.deliveryDays.some(
@@ -343,19 +356,36 @@ class AdminController {
         }
 
         // Apply custom plan overrides if defined on the subscription
-        if (sub.customDetails?.roti !== undefined || sub.planDetails?.roti !== undefined) {
-          finalPreference.roti = `${sub.customDetails?.roti ?? sub.planDetails?.roti} Roti`;
+        const customRoti = sub.customDetails?.roti ?? sub.planDetails?.roti ?? sub.selectedComponents?.roti ?? sub.planDetails?.selections?.roti ?? sub.customDetails?.selections?.roti ?? sub.planDetails?.selectedComponents?.roti ?? sub.customDetails?.selectedComponents?.roti;
+        if (customRoti !== undefined && !isNaN(Number(customRoti))) {
+          finalPreference.roti = `${customRoti} Roti`;
         }
-        const customRice = sub.customDetails?.rice !== undefined ? sub.customDetails.rice : sub.planDetails?.rice;
+
+        const customRice = sub.customDetails?.rice ?? sub.planDetails?.rice ?? sub.selectedComponents?.rice ?? sub.planDetails?.selections?.rice ?? sub.customDetails?.selections?.rice;
         if (customRice !== undefined && Number(customRice) > 0) {
           finalPreference.rice = `${customRice} Rice`;
+        } else if (customRice !== undefined && Number(customRice) === 0) {
+          delete finalPreference.rice;
         }
-        const customDal = sub.customDetails?.dal !== undefined ? sub.customDetails.dal : sub.planDetails?.dal;
+
+        const customDal = sub.customDetails?.dal ?? sub.planDetails?.dal ?? sub.selectedComponents?.dal ?? sub.planDetails?.selections?.dal ?? sub.customDetails?.selections?.dal;
         if (customDal !== undefined && Number(customDal) > 0) {
           finalPreference.dal = `${customDal} Dal`;
+        } else if (customDal !== undefined && Number(customDal) === 0) {
+          delete finalPreference.dal;
         }
-        const customSabji = sub.customDetails?.sabji ?? sub.customDetails?.sabziChoices ?? sub.planDetails?.sabziChoices;
-        if (customSabji !== undefined && Number(customSabji) > 0) {
+
+        const customSabji = sub.customDetails?.sabji ?? sub.customDetails?.sabziChoices ?? sub.planDetails?.sabji ?? sub.planDetails?.sabziChoices ?? sub.selectedComponents?.sabji ?? sub.planDetails?.selections?.sabji ?? sub.customDetails?.selections?.sabji ?? sub.planDetails?.selectedComponents?.sabji ?? sub.customDetails?.selectedComponents?.sabji;
+        if (customSabji !== undefined && Number(customSabji) === 0) {
+          delete finalPreference.sabzi1;
+          delete finalPreference.sabzi2;
+          delete finalPreference.sabzi3;
+          delete finalPreference.sabzi_count;
+        } else if (customSabji !== undefined && Number(customSabji) === 1) {
+          delete finalPreference.sabzi2;
+          delete finalPreference.sabzi3;
+          finalPreference.sabzi_count = "1 Sabji";
+        } else if (customSabji !== undefined && Number(customSabji) > 0) {
           finalPreference.sabzi_count = `${customSabji} Sabji`;
         }
 
@@ -926,9 +956,13 @@ class AdminController {
         const duration = Number(sub.durationDays || 30);
         if (!Number.isFinite(duration) || duration <= 0) return { error: "Invalid subscription duration", code: 400 };
         endDate.setDate(endDate.getDate() + duration);
+        const DeliveryScheduleUtil = require("../utils/deliverySchedule.util");
+        const schedule = DeliveryScheduleUtil.getNextDeliveryDate(now, sub.deliveryDays);
         const updates = {
           status: "Active", approvalStatus: "Accepted", acceptedAt: now.toISOString(),
-          acceptedBy: req.user.uid, startDate: now.toISOString(), endDate: endDate.toISOString(),
+          acceptedBy: req.user.uid, startDate: now.toISOString(),
+          firstDeliveryDate: schedule.deliveryDate,
+          endDate: endDate.toISOString(),
           updatedAt: now.toISOString(),
         };
         let stripeSubscriptionId = null;

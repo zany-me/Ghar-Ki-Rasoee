@@ -29,8 +29,10 @@ interface WeeklyPreferences {
 interface CustomSpecs {
   roti: number;
   rice?: number;
+  dal?: number;
   sabziChoices: number;
   raitaOption: 'none' | '3days' | 'daily';
+  saladOption: 'none' | '3days' | 'daily';
   dessertOption: 'none' | 'weekly' | 'daily';
   saturdaySpecial: boolean;
 }
@@ -150,21 +152,44 @@ const CustomizeSubscription: React.FC = () => {
         let currentPlanType: 'basic' | 'standard' | 'premium' | 'custom' = 'standard';
         let specs: CustomSpecs | null = null;
 
-        if (details.custom || plan.includes('custom') || plan.includes('scratch')) {
+        const customObj = sub.customDetails || {};
+        const selections = details.selections || customObj.selections || (sub as any).selectedComponents || {};
+
+        if (details.custom || details.isCustomPlan || customObj.isCustomPlan || plan.includes('custom') || plan.includes('scratch') || details.roti !== undefined || selections.roti !== undefined || customObj.roti !== undefined || (sub as any).selectedComponents?.roti !== undefined) {
           currentPlanType = 'custom';
-          const sabziCount = Number(details.sabziChoices) || Number(details.sabji) || 2;
+          const rawSabji = details.sabji ?? details.sabziChoices ?? selections.sabji ?? selections.sabziChoices ?? customObj.sabji ?? customObj.sabziChoices ?? (sub as any).selectedComponents?.sabji;
+          const sabziCount = rawSabji !== undefined && !isNaN(Number(rawSabji)) ? Number(rawSabji) : 2;
+
+          const rawRoti = details.roti ?? selections.roti ?? customObj.roti ?? (sub as any).selectedComponents?.roti;
+          const rotiCount = rawRoti !== undefined && !isNaN(Number(rawRoti)) ? Number(rawRoti) : 6;
+
+          const rawRice = details.rice ?? selections.rice ?? customObj.rice ?? (sub as any).selectedComponents?.rice;
+          const riceCount = rawRice !== undefined && !isNaN(Number(rawRice)) ? Number(rawRice) : 0;
+
+          const rawDal = details.dal ?? selections.dal ?? customObj.dal ?? (sub as any).selectedComponents?.dal;
+          const dalCount = rawDal !== undefined && !isNaN(Number(rawDal)) ? Number(rawDal) : 0;
+
           const raitaOpt = (details.raitaOption as 'none' | '3days' | 'daily') || 
-            (details.raitaFrequency === 'daily' ? 'daily' : details.raitaFrequency === 'threePerWeek' ? '3days' : 'none');
+            (details.raitaFrequency === 'daily' || selections.raitaFrequency === 'daily' ? 'daily' : 
+             details.raitaFrequency === 'threePerWeek' || selections.raitaFrequency === 'threePerWeek' ? '3days' : 'none');
+
+          const saladOpt = (details.saladOption as 'none' | '3days' | 'daily') || 
+            (details.saladFrequency === 'daily' || selections.saladFrequency === 'daily' ? 'daily' : 
+             details.saladFrequency === 'threePerWeek' || selections.saladFrequency === 'threePerWeek' ? '3days' : 'none');
+             
           const dessertOpt = (details.dessertOption as 'none' | 'weekly' | 'daily') || 
-            (details.sweetDishFrequency === 'twicePerWeek' ? 'weekly' : 'none');
+            (details.sweetDishFrequency === 'twicePerWeek' || selections.sweetDishFrequency === 'twicePerWeek' ? 'weekly' : 
+             details.sweetDishFrequency === 'daily' || selections.sweetDishFrequency === 'daily' ? 'daily' : 'none');
 
           specs = {
-            roti: Number(details.roti) !== undefined && !isNaN(Number(details.roti)) ? Number(details.roti) : 6,
-            rice: Number(details.rice) || 0,
+            roti: rotiCount,
+            rice: riceCount,
+            dal: dalCount,
             sabziChoices: sabziCount,
             raitaOption: raitaOpt,
+            saladOption: saladOpt,
             dessertOption: dessertOpt,
-            saturdaySpecial: !!details.saturdaySpecial
+            saturdaySpecial: Boolean(details.saturdaySpecial ?? selections.saturdaySpecial ?? customObj.saturdaySpecial)
           };
           setCustomSpecs(specs);
         } else if (plan.includes('basic')) {
@@ -279,6 +304,20 @@ const CustomizeSubscription: React.FC = () => {
     return 2;
   };
 
+  const getRotiCount = () => {
+    if (planType === 'custom' && customSpecs?.roti !== undefined) {
+      return customSpecs.roti;
+    }
+    const details = subscription?.planDetails || {};
+    const customObj = subscription?.customDetails || {};
+    const selections = details.selections || customObj.selections || (subscription as any)?.selectedComponents || {};
+    const rawRoti = details.roti ?? selections.roti ?? customObj.roti ?? (subscription as any)?.selectedComponents?.roti;
+    if (rawRoti !== undefined && !isNaN(Number(rawRoti))) {
+      return Number(rawRoti);
+    }
+    return currentDayMenu?.roti || (planType === 'basic' ? 4 : 8);
+  };
+
   const isRaitaIncludedToday = () => {
     if (planType === 'custom') {
       const opt = customSpecs?.raitaOption || 'none';
@@ -291,11 +330,23 @@ const CustomizeSubscription: React.FC = () => {
     return false;
   };
 
+  const isSaladIncludedToday = () => {
+    if (planType === 'custom') {
+      const opt = customSpecs?.saladOption || 'none';
+      if (opt === 'daily') return true;
+      if (opt === '3days' && ['monday', 'wednesday', 'friday'].includes(selectedDay)) return true;
+      return false;
+    }
+    if (planType === 'premium') return true;
+    return false;
+  };
+
   const isDessertIncludedToday = () => {
     if (planType === 'custom') {
       const opt = customSpecs?.dessertOption || 'none';
       if (opt === 'daily') return true;
-      if (opt === 'weekly' && selectedDay === 'wednesday') return true;
+      if (opt === 'weekly' && (selectedDay === 'wednesday' || selectedDay === 'saturday')) return true;
+      if (selectedDay === 'saturday' && customSpecs?.saturdaySpecial) return true;
       return false;
     }
     if (planType === 'premium' && (selectedDay === 'wednesday' || currentDayMenu?.isSaturdaySpecial)) return true;
@@ -626,8 +677,8 @@ const CustomizeSubscription: React.FC = () => {
                   </div>
                 )}
 
-                {/* Side Option Choice Block */}
-                {isRaitaIncludedToday() && (
+                {/* Side Option Choice Block (Standard & Premium plans where side is selectable) */}
+                {planType !== 'custom' && isRaitaIncludedToday() && (
                   <div className="bg-orange-50/40 rounded-2xl p-4 sm:p-5 border border-orange-200 shadow-xs my-4">
                     <div className="mb-3">
                       <h4 className="font-black text-xs sm:text-sm text-orange-950 uppercase tracking-wider flex items-center gap-1.5">
@@ -687,7 +738,7 @@ const CustomizeSubscription: React.FC = () => {
                   <div className="flex flex-wrap gap-2.5 sm:gap-3 text-xs font-bold text-gray-700">
                     <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-xs">
                       <span>🫓</span>
-                      <span>{planType === 'custom' ? customSpecs?.roti : currentDayMenu.roti} Tawa Roti</span>
+                      <span>{getRotiCount()} Tawa Roti</span>
                     </div>
 
                     {planType === 'custom' && customSpecs?.rice && customSpecs.rice > 0 ? (
@@ -697,17 +748,41 @@ const CustomizeSubscription: React.FC = () => {
                       </div>
                     ) : null}
 
-                    {isRaitaIncludedToday() && (
+                    {planType === 'custom' && customSpecs?.dal && customSpecs.dal > 0 ? (
                       <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-xs">
-                        <span>🥗</span>
-                        <span className="text-[#ea580c]">Selected Side: {currentDayPrefs.sideOption || 'Raita'}</span>
+                        <span>🥣</span>
+                        <span>{customSpecs.dal} Dal Portion{customSpecs.dal > 1 ? 's' : ''}</span>
                       </div>
+                    ) : null}
+
+                    {planType === 'custom' ? (
+                      <>
+                        {isRaitaIncludedToday() && (
+                          <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-teal-200 shadow-xs text-teal-800">
+                            <span>🥣</span>
+                            <span>Fresh Raita ({customSpecs?.raitaOption === 'daily' ? 'Daily' : 'Mon, Wed, Fri'})</span>
+                          </div>
+                        )}
+                        {isSaladIncludedToday() && (
+                          <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-emerald-200 shadow-xs text-emerald-800">
+                            <span>🥗</span>
+                            <span>Garden Salad ({customSpecs?.saladOption === 'daily' ? 'Daily' : 'Mon, Wed, Fri'})</span>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      isRaitaIncludedToday() && (
+                        <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-xs">
+                          <span>{currentDayPrefs.sideOption === 'Salad' ? '🥗' : '🥣'}</span>
+                          <span className="text-[#ea580c]">Selected Side: {currentDayPrefs.sideOption || 'Raita'}</span>
+                        </div>
+                      )
                     )}
 
                     {isDessertIncludedToday() && (
-                      <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-xs">
+                      <div className="flex items-center gap-1.5 sm:gap-2 bg-white px-3 py-1.5 rounded-xl border border-pink-200 shadow-xs text-pink-700">
                         <span>🍮</span>
-                        <span className="text-pink-600">Dessert Included</span>
+                        <span>Dessert Included {planType === 'custom' && customSpecs?.dessertOption === 'daily' ? '(Daily)' : '(Wed & Sat)'}</span>
                       </div>
                     )}
                   </div>

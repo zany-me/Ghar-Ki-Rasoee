@@ -28,8 +28,10 @@ const ViewCustomerCustomization: React.FC = () => {
   const [customSpecs, setCustomSpecs] = useState<{
     roti: number;
     rice: number;
+    dal?: number;
     sabziChoices: number;
     raitaOption: string;
+    saladOption?: string;
     dessertOption: string;
     saturdaySpecial: boolean;
   } | null>(null);
@@ -59,16 +61,36 @@ const ViewCustomerCustomization: React.FC = () => {
         if (subData) {
             const planName = subData.plan?.toLowerCase() || '';
             const details = subData.planDetails || {};
+            const customObj = subData.customDetails || {};
+            const selections = details.selections || customObj.selections || (subData as any).selectedComponents || {};
             
-            if (details.custom || planName.includes('custom')) {
+            if (details.custom || details.isCustomPlan || customObj.isCustomPlan || planName.includes('custom') || planName.includes('scratch') || details.roti !== undefined || selections.roti !== undefined || customObj.roti !== undefined || (subData as any).selectedComponents?.roti !== undefined) {
                 setPlanType('custom');
+                const rawSabji = details.sabji ?? details.sabziChoices ?? selections.sabji ?? selections.sabziChoices ?? customObj.sabji ?? customObj.sabziChoices ?? (subData as any).selectedComponents?.sabji;
+                const sabziCount = rawSabji !== undefined && !isNaN(Number(rawSabji)) ? Number(rawSabji) : 2;
+
+                const rawRoti = details.roti ?? selections.roti ?? customObj.roti ?? (subData as any).selectedComponents?.roti;
+                const rotiCount = rawRoti !== undefined && !isNaN(Number(rawRoti)) ? Number(rawRoti) : 6;
+
+                const rawRice = details.rice ?? selections.rice ?? customObj.rice ?? (subData as any).selectedComponents?.rice;
+                const riceCount = rawRice !== undefined && !isNaN(Number(rawRice)) ? Number(rawRice) : 0;
+
+                const rawDal = details.dal ?? selections.dal ?? customObj.dal ?? (subData as any).selectedComponents?.dal;
+                const dalCount = rawDal !== undefined && !isNaN(Number(rawDal)) ? Number(rawDal) : 0;
+
+                const raitaOpt = details.raitaOption || details.raitaFrequency || selections.raitaFrequency || 'none';
+                const saladOpt = details.saladOption || details.saladFrequency || selections.saladFrequency || 'none';
+                const dessertOpt = details.dessertOption || details.sweetDishFrequency || selections.sweetDishFrequency || 'none';
+
                 setCustomSpecs({
-                    roti: Number(details.roti) !== undefined ? Number(details.roti) : 6,
-                    rice: Number(details.rice) || 0,
-                    sabziChoices: Number(details.sabziChoices) || 2,
-                    raitaOption: details.raitaOption || 'none',
-                    dessertOption: details.dessertOption || 'none',
-                    saturdaySpecial: !!details.saturdaySpecial
+                    roti: rotiCount,
+                    rice: riceCount,
+                    dal: dalCount,
+                    sabziChoices: sabziCount,
+                    raitaOption: raitaOpt,
+                    saladOption: saladOpt,
+                    dessertOption: dessertOpt,
+                    saturdaySpecial: Boolean(details.saturdaySpecial ?? selections.saturdaySpecial ?? customObj.saturdaySpecial)
                 });
             } else {
                 setPlanType(planName.includes('basic') ? 'basic' : 
@@ -230,8 +252,13 @@ const ViewCustomerCustomization: React.FC = () => {
             const showSabzi3 = planType === 'custom' && customSpecs && customSpecs.sabziChoices === 3;
 
             const getRotiCount = () => {
-              if (planType === 'custom') return customSpecs?.roti;
-              return dayMenu.roti;
+              if (planType === 'custom' && customSpecs?.roti !== undefined) return customSpecs.roti;
+              const details = customerInfo?.planDetails || {};
+              const customObj = customerInfo?.customDetails || {};
+              const selections = details.selections || customObj.selections || (customerInfo as any)?.selectedComponents || {};
+              const rawRoti = details.roti ?? selections.roti ?? customObj.roti ?? (customerInfo as any)?.selectedComponents?.roti;
+              if (rawRoti !== undefined && !isNaN(Number(rawRoti))) return Number(rawRoti);
+              return dayMenu.roti || (planType === 'basic' ? 4 : 8);
             };
 
             const getRaitaText = () => {
@@ -298,6 +325,12 @@ const ViewCustomerCustomization: React.FC = () => {
                         </div>
                     ) : (
                         <div className="space-y-3">
+                            {planType === 'custom' && customSpecs && customSpecs.sabziChoices === 0 && (
+                                <div className="bg-gray-50 border border-dashed border-gray-200 rounded-xl p-4 text-center">
+                                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">No Sabji Included</p>
+                                    <p className="text-[10px] text-gray-400 mt-0.5">This custom plan does not include daily sabzi.</p>
+                                </div>
+                            )}
                             {showSabzi1 && (
                               <div className="flex flex-col gap-1">
                                   <p className="text-[10px] text-gray-400 font-bold uppercase">Sabzi 1</p>
@@ -344,18 +377,46 @@ const ViewCustomerCustomization: React.FC = () => {
                     )}
                 </div>
                 
-                {isDeliveryDay && (
-                  <div className="bg-gray-50/50 px-5 py-3.5 mt-auto border-t border-gray-50 flex items-center justify-between flex-wrap gap-2 text-xs font-bold text-gray-500">
-                      <span>Includes: {getRotiCount()} Roti{customSpecs?.rice ? `, ${customSpecs.rice} Rice` : ''}{getDessertText() ? `, ${getDessertText()}` : ''}</span>
-                      <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase border ${
-                        getRaitaText() === 'Salad'
-                          ? 'bg-orange-50 text-orange-700 border-orange-200'
-                          : 'bg-teal-50 text-teal-700 border-teal-150'
-                      }`}>
-                        {getRaitaText() === 'Salad' ? '🥗 Salad' : '🥣 Raita'}
-                      </span>
-                  </div>
-                )}
+                {isDeliveryDay && (() => {
+                  const isThreeDay = ['monday', 'wednesday', 'friday'].includes(day.toLowerCase());
+                  const hasCustomRaitaToday = customSpecs?.raitaOption === 'daily' || (['threePerWeek', '3days'].includes(customSpecs?.raitaOption || '') && isThreeDay);
+                  const hasCustomSaladToday = customSpecs?.saladOption === 'daily' || (['threePerWeek', '3days'].includes(customSpecs?.saladOption || '') && isThreeDay);
+
+                  return (
+                    <div className="bg-gray-50/50 px-5 py-3.5 mt-auto border-t border-gray-50 flex items-center justify-between flex-wrap gap-2 text-xs font-bold text-gray-500">
+                        <span>Includes: {getRotiCount()} Roti{customSpecs?.dal ? `, ${customSpecs.dal} Dal` : ''}{customSpecs?.rice ? `, ${customSpecs.rice} Rice` : ''}{getDessertText() ? `, ${getDessertText()}` : ''}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {planType === 'custom' ? (
+                            <>
+                              {hasCustomRaitaToday && (
+                                <span className="px-2 py-0.5 rounded-lg text-[10px] font-black uppercase border bg-teal-50 text-teal-700 border-teal-150">
+                                  🥣 Raita ({customSpecs?.raitaOption === 'daily' ? 'Daily' : 'Mon, Wed, Fri'})
+                                </span>
+                              )}
+                              {hasCustomSaladToday && (
+                                <span className="px-2 py-0.5 rounded-lg text-[10px] font-black uppercase border bg-emerald-50 text-emerald-700 border-emerald-150">
+                                  🥗 Salad ({customSpecs?.saladOption === 'daily' ? 'Daily' : 'Mon, Wed, Fri'})
+                                </span>
+                              )}
+                              {!hasCustomRaitaToday && !hasCustomSaladToday && (
+                                <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase text-gray-400 bg-gray-100">
+                                  No Side Included
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase border ${
+                              getRaitaText() === 'Salad'
+                                ? 'bg-orange-50 text-orange-700 border-orange-200'
+                                : 'bg-teal-50 text-teal-700 border-teal-150'
+                            }`}>
+                              {getRaitaText() === 'Salad' ? '🥗 Salad' : '🥣 Raita'}
+                            </span>
+                          )}
+                        </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}

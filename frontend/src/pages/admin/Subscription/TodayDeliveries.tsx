@@ -513,8 +513,10 @@ const TodayDeliveries: React.FC = () => {
                                       const displayVal = String(value);
                                       let formattedVal = displayVal;
                                       if (isSideOption) {
-                                          if (displayVal.toLowerCase() === 'salad') formattedVal = '🥗 Salad';
-                                          else if (displayVal.toLowerCase() === 'raita') formattedVal = '🥣 Raita';
+                                          const lower = displayVal.toLowerCase();
+                                          if (lower.includes('raita') && lower.includes('salad')) formattedVal = '🥣 Raita + 🥗 Salad';
+                                          else if (lower === 'salad') formattedVal = '🥗 Salad';
+                                          else if (lower === 'raita') formattedVal = '🥣 Raita';
                                       }
                                       return (
                                           <div key={key} className={`p-3 rounded-xl border shadow-sm ${

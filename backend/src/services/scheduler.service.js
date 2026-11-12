@@ -37,6 +37,22 @@ class SchedulerService {
           return;
         }
 
+        // Skip if first delivery date has not arrived yet, or ordered today after morning delivery
+        const DeliveryScheduleUtil = require("../utils/deliverySchedule.util");
+        const firstDelivery = sub.firstDeliveryDate || (sub.startDate ? sub.startDate.split("T")[0] : null);
+        if (firstDelivery && firstDelivery > todayString) {
+          console.log(`Skipping order for user ${sub.userId} (Starts on ${firstDelivery})`);
+          return;
+        }
+
+        if (sub.createdAt) {
+          const createdSchedule = DeliveryScheduleUtil.getNextDeliveryDate(sub.createdAt, sub.deliveryDays);
+          if (createdSchedule.deliveryDate > todayString && (!sub.startDate || sub.startDate.split("T")[0] >= todayString)) {
+            console.log(`Skipping order for user ${sub.userId} (Created today after 8 AM, first delivery on ${createdSchedule.deliveryDate})`);
+            return;
+          }
+        }
+
         // Check if remaining days > 0
         if (sub.remainingDays <= 0) {
           console.log(`Subscription expired for user ${sub.userId}`);
@@ -116,9 +132,69 @@ class SchedulerService {
           finalPreference = { ...finalPreference, ...todayPreference };
         }
 
+        // Apply custom plan overrides if defined on the subscription
+        const customRoti = sub.customDetails?.roti ?? sub.planDetails?.roti ?? sub.selectedComponents?.roti ?? sub.planDetails?.selections?.roti ?? sub.customDetails?.selections?.roti ?? sub.planDetails?.selectedComponents?.roti ?? sub.customDetails?.selectedComponents?.roti;
+        if (customRoti !== undefined && !isNaN(Number(customRoti))) {
+          finalPreference.roti = `${customRoti} Roti`;
+        }
+
+        const customRice = sub.customDetails?.rice ?? sub.planDetails?.rice ?? sub.selectedComponents?.rice ?? sub.planDetails?.selections?.rice ?? sub.customDetails?.selections?.rice;
+        if (customRice !== undefined && Number(customRice) > 0) {
+          finalPreference.rice = `${customRice} Rice`;
+        } else if (customRice !== undefined && Number(customRice) === 0) {
+          delete finalPreference.rice;
+        }
+
+        const customDal = sub.customDetails?.dal ?? sub.planDetails?.dal ?? sub.selectedComponents?.dal ?? sub.planDetails?.selections?.dal ?? sub.customDetails?.selections?.dal;
+        if (customDal !== undefined && Number(customDal) > 0) {
+          finalPreference.dal = `${customDal} Dal`;
+        } else if (customDal !== undefined && Number(customDal) === 0) {
+          delete finalPreference.dal;
+        }
+
+        const customSabji = sub.customDetails?.sabji ?? sub.customDetails?.sabziChoices ?? sub.planDetails?.sabji ?? sub.planDetails?.sabziChoices ?? sub.selectedComponents?.sabji ?? sub.planDetails?.selections?.sabji ?? sub.customDetails?.selections?.sabji ?? sub.planDetails?.selectedComponents?.sabji ?? sub.customDetails?.selectedComponents?.sabji;
+        if (customSabji !== undefined && Number(customSabji) === 0) {
+          delete finalPreference.sabzi1;
+          delete finalPreference.sabzi2;
+          delete finalPreference.sabzi3;
+          delete finalPreference.sabzi_count;
+        } else if (customSabji !== undefined && Number(customSabji) === 1) {
+          delete finalPreference.sabzi2;
+          delete finalPreference.sabzi3;
+          finalPreference.sabzi_count = "1 Sabji";
+        } else if (customSabji !== undefined && Number(customSabji) > 0) {
+          finalPreference.sabzi_count = `${customSabji} Sabji`;
+        }
+
         if (finalPreference.sideOption) {
           finalPreference.side_option = finalPreference.sideOption;
           delete finalPreference.sideOption;
+        }
+
+        // Apply custom side option from subscription details
+        const customRaita = sub.customDetails?.raitaFrequency ?? sub.planDetails?.raitaFrequency ?? sub.selectedComponents?.raitaFrequency ?? sub.planDetails?.selections?.raitaFrequency ?? sub.customDetails?.selections?.raitaFrequency ?? sub.customDetails?.raitaOption ?? sub.planDetails?.raitaOption;
+        const customSalad = sub.customDetails?.saladFrequency ?? sub.planDetails?.saladFrequency ?? sub.selectedComponents?.saladFrequency ?? sub.planDetails?.selections?.saladFrequency ?? sub.customDetails?.selections?.saladFrequency ?? sub.customDetails?.saladOption ?? sub.planDetails?.saladOption;
+
+        const isCustomSidePlan = Boolean(
+          sub.customDetails?.isCustomPlan || sub.planDetails?.isCustomPlan || sub.planDetails?.custom ||
+          (sub.plan && (sub.plan.toLowerCase().includes("custom") || sub.plan.toLowerCase().includes("scratch"))) ||
+          customRaita !== undefined || customSalad !== undefined
+        );
+
+        if (isCustomSidePlan) {
+          const isThreeDay = ["monday", "wednesday", "friday"].includes(dayName.toLowerCase());
+          const hasRaita = customRaita === "daily" || (["threePerWeek", "3days"].includes(customRaita) && isThreeDay);
+          const hasSalad = customSalad === "daily" || (["threePerWeek", "3days"].includes(customSalad) && isThreeDay);
+
+          if (hasRaita && hasSalad) {
+            finalPreference.side_option = "Raita + Salad";
+          } else if (hasRaita) {
+            finalPreference.side_option = "Raita";
+          } else if (hasSalad) {
+            finalPreference.side_option = "Salad";
+          } else {
+            delete finalPreference.side_option;
+          }
         }
 
         // Clean up empty fields

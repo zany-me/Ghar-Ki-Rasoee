@@ -23,6 +23,8 @@ class SubscriptionModel {
     ];
 
     const deliveryDaysCount = Math.round((duration / 7) * deliveryDays.length);
+    const DeliveryScheduleUtil = require("../utils/deliverySchedule.util");
+    const scheduleInfo = DeliveryScheduleUtil.getNextDeliveryDate(startDate, deliveryDays);
     const priceBreakdownFields = [
       "basePrice",
       "subtotal",
@@ -41,11 +43,13 @@ class SubscriptionModel {
       userId: uid,
       plan: planData.plan || "Custom Plan",
       planDetails: planData.planDetails || {},
+      customDetails: planData.customDetails || (planData.planDetails?.isCustomPlan || planData.planDetails?.custom ? planData.planDetails : null),
       status: isCOD ? "Pending" : "Active",
       ...(isCOD ? { approvalStatus: "Pending" } : {}),
       durationDays: duration,
       replacesSubscriptionId: planData.replacesSubscriptionId || null,
       startDate: isCOD ? null : startDate.toISOString(),
+      firstDeliveryDate: isCOD ? null : scheduleInfo.deliveryDate,
       endDate: isCOD ? null : endDate.toISOString(),
       remainingDays: deliveryDaysCount,
       deliveryDays,
